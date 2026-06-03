@@ -8,6 +8,8 @@ wandb
 **/.DS_Store
 *.lprof
 
+example_*/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

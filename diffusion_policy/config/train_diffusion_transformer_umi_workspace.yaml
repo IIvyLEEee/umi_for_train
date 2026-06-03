@@ -15,6 +15,7 @@ n_emb: 768
 policy:
   _target_: diffusion_policy.policy.diffusion_transformer_timm_policy.DiffusionTransformerTimmPolicy
 
+  # device: "cuda:3"
   shape_meta: ${shape_meta}
   
   noise_scheduler:
@@ -47,7 +48,9 @@ policy:
 
     ##### from scratch #####
     # model_name: 'resnet34.a1_in1k'
-    model_name: 'vit_base_patch16_clip_224.openai'
+    # model_name: 'vit_base_patch16_clip_224.openai'
+    model_name: 'vit_large_patch14_clip_224.openai'
+    # model_name: 'vit_large_patch14_dinov2.lvd142m'
     # model_name: 'convnext_base.clip_laion2b_augreg_ft_in12k'
     pretrained: True
     frozen: False
@@ -107,14 +110,14 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 64
+  batch_size: 32
   num_workers: 8
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
-  batch_size: 64
+  batch_size: 32
   num_workers: 8
   shuffle: False
   pin_memory: True
@@ -141,7 +144,9 @@ training:
   # replace BatchNorm with GroupNorm.
   use_ema: True
   freeze_encoder: False
-  # training loop control
+  # If False, when resuming we will NOT load optimizer state from checkpoint.
+  # Recommended when switching precision (fp32 -> fp16) to reinitialize optimizer.
+  load_optimizer_on_resume: False
   # in epochs
   rollout_every: 10
   checkpoint_every: 10

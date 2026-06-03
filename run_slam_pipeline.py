@@ -1,6 +1,7 @@
 """
 Main script for UMI SLAM pipeline.
 python run_slam_pipeline.py <session_dir>
+python run_slam_pipeline.py -np <session_dir>   # skip docker pull, use local images
 """
 
 import sys
@@ -19,7 +20,14 @@ import subprocess
 @click.command()
 @click.argument('session_dir', nargs=-1)
 @click.option('-c', '--calibration_dir', type=str, default=None)
-def main(session_dir, calibration_dir):
+@click.option(
+    '-np',
+    '--no_docker_pull',
+    is_flag=True,
+    default=False,
+    help='Do not run docker pull; use locally cached images.',
+)
+def main(session_dir, calibration_dir, no_docker_pull):
     script_dir = pathlib.Path(__file__).parent.joinpath('scripts_slam_pipeline')
     if calibration_dir is None:
         calibration_dir = pathlib.Path(__file__).parent.joinpath('example', 'calibration')
@@ -47,6 +55,8 @@ def main(session_dir, calibration_dir):
             'python', str(script_path),
             str(session)
         ]
+        if no_docker_pull:
+            cmd.append('--no_docker_pull')
         result = subprocess.run(cmd)
         assert result.returncode == 0
 
@@ -63,6 +73,8 @@ def main(session_dir, calibration_dir):
                 '--input_dir', str(mapping_dir),
                 '--map_path', str(map_path)
             ]
+            if no_docker_pull:
+                cmd.append('--no_docker_pull')
             result = subprocess.run(cmd)
             assert result.returncode == 0
             assert map_path.is_file()
@@ -75,6 +87,8 @@ def main(session_dir, calibration_dir):
             '--input_dir', str(demo_dir),
             '--map_path', str(map_path)
         ]
+        if no_docker_pull:
+            cmd.append('--no_docker_pull')
         result = subprocess.run(cmd)
         assert result.returncode == 0
 
