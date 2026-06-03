@@ -9,6 +9,7 @@ wandb
 *.lprof
 
 example_*/
+example_*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
