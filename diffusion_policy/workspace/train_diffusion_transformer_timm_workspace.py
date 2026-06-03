@@ -80,7 +80,16 @@ class TrainDiffusionTransformerTimmWorkspace(BaseWorkspace):
             lastest_ckpt_path = self.get_checkpoint_path()
             if lastest_ckpt_path.is_file():
                 print(f"Resuming from checkpoint {lastest_ckpt_path}")
-                self.load_checkpoint(path=lastest_ckpt_path)
+                # decide whether to load optimizer state based on config
+                # default behavior preserves previous behavior (load optimizer)
+                load_opt = True
+                if 'load_optimizer_on_resume' in cfg.training:
+                    load_opt = bool(cfg.training.load_optimizer_on_resume)
+                if load_opt:
+                    self.load_checkpoint(path=lastest_ckpt_path)
+                else:
+                    # exclude optimizer so we only restore model weights and other desired state
+                    self.load_checkpoint(path=lastest_ckpt_path, exclude_keys=['optimizer'])
 
         # configure dataset
         dataset: BaseImageDataset
@@ -107,17 +116,35 @@ class TrainDiffusionTransformerTimmWorkspace(BaseWorkspace):
             self.ema_model.set_normalizer(normalizer)
 
         # configure lr scheduler
-        lr_scheduler = get_scheduler(
-            cfg.training.lr_scheduler,
+        # create lr scheduler; if optimizer state was NOT loaded from checkpoint
+        # then avoid passing last_epoch (which relies on optimizer.param_groups['initial_lr'])
+        num_training_steps = (len(train_dataloader) * cfg.training.num_epochs) // cfg.training.gradient_accumulate_every
+        scheduler_kwargs = dict(
             optimizer=self.optimizer,
             num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=(
-                len(train_dataloader) * cfg.training.num_epochs) \
-                    // cfg.training.gradient_accumulate_every,
-            # pytorch assumes stepping LRScheduler every epoch
-            # however huggingface diffusers steps it every batch
-            last_epoch=self.global_step-1
+            num_training_steps=num_training_steps,
         )
+        # determine whether we restored optimizer state
+        restored_optimizer = False
+        if cfg.training.resume:
+            # if the config explicitly disables loading optimizer, then it's not restored
+            if 'load_optimizer_on_resume' in cfg.training:
+                restored_optimizer = bool(cfg.training.load_optimizer_on_resume)
+            else:
+                # default: assume optimizer restored
+                restored_optimizer = True
+
+        if restored_optimizer and self.global_step > 0:
+            lr_scheduler = get_scheduler(
+                cfg.training.lr_scheduler,
+                last_epoch=self.global_step-1,
+                **scheduler_kwargs
+            )
+        else:
+            lr_scheduler = get_scheduler(
+                cfg.training.lr_scheduler,
+                **scheduler_kwargs
+            )
 
         # configure ema
         ema: EMAModel = None
@@ -206,7 +233,8 @@ class TrainDiffusionTransformerTimmWorkspace(BaseWorkspace):
                         # compute loss
                         raw_loss = self.model(batch)
                         loss = raw_loss / cfg.training.gradient_accumulate_every
-                        loss.backward()
+                        # use Accelerator's backward to ensure proper AMP scaling
+                        accelerator.backward(loss)
 
                         # step optimizer
                         if self.global_step % cfg.training.gradient_accumulate_every == 0:

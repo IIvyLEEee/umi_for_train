@@ -81,7 +81,15 @@ class JsonLogger:
         if last_line_start < last_line_end:
             # has last line of json
             last_line = file.readline()
-            self.last_log = json.loads(last_line)
+            # be defensive: last_line may be empty, partial, or corrupted JSON
+            try:
+                if last_line and last_line.strip():
+                    self.last_log = json.loads(last_line)
+                else:
+                    self.last_log = None
+            except json.JSONDecodeError:
+                # ignore malformed last line instead of raising - keep logger resilient
+                self.last_log = None
         
         # remove the last incomplete line
         file.seek(last_line_end)

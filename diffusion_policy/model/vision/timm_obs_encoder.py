@@ -83,6 +83,9 @@ class TimmObsEncoder(ModuleAttrMixin):
         key_shape_map = dict()
 
         assert global_pool == ''
+        import os
+        os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+        from huggingface_hub import hf_hub_download
         model = timm.create_model(
             model_name=model_name,
             pretrained=pretrained,
