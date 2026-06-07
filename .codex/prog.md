@@ -290,3 +290,15 @@
   our/256 已超过 100 step，三卡各占约 15.3 GiB，训练正常；完成后会自动启动
   QAT our/256 和 QAT 768 scratch。
 - 保留 GPU2 上原有 `umi_fp32_256_gpu2` 训练，不与新任务共享 GPU。
+
+## 2026-06-07 10:04:00 +0800
+
+- 按要求停止 `pick_night_multigpu` 和 `umi_fp32_256_gpu2` 两个训练会话，四张
+  GPU 均已释放；night 串行脚本在第一项 epoch 0 中途停止，未继续启动后两项。
+- 使用 GPU0/1/2 启动 `example_pick_night` 的 QAT 768 from-scratch 训练，
+  每卡 batch 32、全局 batch 96、200 epochs，GPU3 保持空闲。
+- 首次多卡启动继承 Accelerate 的 FP16 默认值，在自定义 attention backward
+  中因 Float/Half 类型不一致失败。保持算子代码不变，增加
+  `accelerate launch --mixed_precision no` 后重新启动成功。
+- 当前 QAT 768 已完成多个 forward/backward step，每卡约占 37.5 GiB；
+  每个 epoch 为 1372 step，初期约 6.1 秒/step。
