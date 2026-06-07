@@ -267,7 +267,7 @@
   `diffusers.DDIMScheduler`；仓库自定义
   `diffusion_policy.schedule.ddim_schedule.DDIMScheduler` 当前未被这两条路径使用。
 
-## 2026-06-07 10:30:00 +0800
+## 2026-06-07 09:50:00 +0800
 
 - 为七组多卡对照实验新增 `.codex/multigpu_experiments.md`，所有命令通过
   `BATCH_SIZE_PER_GPU` 配置每卡 batch，并明确全局 batch 的计算方式。
@@ -278,3 +278,15 @@
   `example_pick_night` 的 FP32 our/256、QAT our/256、QAT 768 三项实验。
 - 新数据集上的 QAT 实验统一按 from-scratch 启动；768 QAT 显式清空旧数据集
   checkpoint，并恢复 LR 3e-4 和 2000-step warmup。
+
+## 2026-06-07 09:56:00 +0800
+
+- Hydra 解析验证通过：FP32 768、FP32 our/256、QAT 768 scratch、QAT
+  our/256 均正确解析模型入口、维度、每卡 batch、LR 和 warmup；脚本通过
+  `bash -n`，相关 Python 文件通过 `compileall`。
+- 提交 `a3e7b15` 已推送到远端 `iivy_umi/qat`。
+- 已启动 tmux 会话 `pick_night_multigpu`，在 GPU0/1/3 上以每卡 batch 16、
+  全局 batch 48 串行执行三项 `example_pick_night` 实验。第一项 FP32
+  our/256 已超过 100 step，三卡各占约 15.3 GiB，训练正常；完成后会自动启动
+  QAT our/256 和 QAT 768 scratch。
+- 保留 GPU2 上原有 `umi_fp32_256_gpu2` 训练，不与新任务共享 GPU。
