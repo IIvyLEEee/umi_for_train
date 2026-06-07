@@ -2,9 +2,10 @@ import torch
 import torch.nn as nn
 
 # import torch.nn.functional as F
-from diffusion_policy.module.linear import Linear
-
-# from diffusion_policy.module.softmax import SoftmaxFunc
+# from diffusion_policy.module.linear import Linear
+import diffusion_policy.module.quant_linear_a as qu
+from diffusion_policy.module.softmax import Softmax
+import diffusion_policy.module.quant_linear_b as fe
 from torch.autograd import Function
 from torch.nn.modules.activation import MultiheadAttention
 
@@ -22,8 +23,8 @@ class MultiHeadAttentionFunc1(Function):
         )
         energy = torch.einsum("nqhd,nlhd->nhql", [queries, keys])
         # atten_mask = atten_mask.unsqueeze(0).unsqueeze(0)
-        if atten_mask is not None:
-            energy = energy + atten_mask
+        # if atten_mask is not None:
+        #     energy = energy + atten_mask
         ctx.save_for_backward(queries, keys, atten_mask)
         ctx.embed_size = embed_size
         return energy
@@ -87,25 +88,33 @@ class MultiHeadAttention(nn.Module):
             self.head_dim * num_heads == embed_size
         ), "Embedding size needs to be divisible by heads"
 
-        self.values = Linear(embed_size, embed_size, bias=False)
-        self.keys = Linear(embed_size, embed_size, bias=False)
-        self.queries = Linear(embed_size, embed_size, bias=False)
-        self.fc_out = Linear(embed_size, embed_size, bias=False)
-        self.softmax = nn.Softmax(dim=3)
+        self.values = qu.Linear(embed_size, embed_size, bias=False)
+        self.keys = qu.Linear(embed_size, embed_size, bias=False)
+        self.queries = qu.Linear(embed_size, embed_size, bias=False)
+        self.fc_out = fe.Linear(embed_size, embed_size, bias=False)
+        # self.softmax = nn.Softmax(dim=3)
+        self.softmax = Softmax()
         self.dropout = nn.Dropout(self.dropout)
 
     def forward(self, queries, keys, values, attn_mask=None):
-        values = self.values(values)
-        # print("input:", keys.max(), keys.min())
-        keys = self.keys(keys)
-        # print("output:", keys.max(), keys.min())
-        queries = self.queries(queries)
+        queries, q_delta = self.queries(queries, 1, queries.clone().detach().to(torch.float))
+        keys, k_delta = self.keys(keys, 1, keys.clone().detach().to(torch.float))
+        values, v_delta = self.values(values, 1, values.clone().detach().to(torch.float))
+
+        queries = queries.to(torch.float) * q_delta
+        keys = keys.to(torch.float) * k_delta
+        values = values.to(torch.float) * v_delta
+        # queries = self.queries(queries)
+        # keys = self.keys(keys)
+        # values = self.values(values)
 
         qk = MultiHeadAttentionFunc1.apply(queries, keys, self.num_heads, attn_mask)
-        qk_softmax = self.softmax(qk)
+        qk_softmax = self.softmax(qk).to(torch.float)
+
         qk_dropout = self.dropout(qk_softmax)
         qkv = MultiHeadAttentionFunc2.apply(qk_dropout, values, self.num_heads)
-        out = self.fc_out(qkv)
+        out = self.fc_out(qkv, 1, qkv)
+        # out = self.fc_out(qkv)
         return out
 
 

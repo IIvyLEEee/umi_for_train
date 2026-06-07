@@ -1,8 +1,8 @@
 import torch
 import diffusion_policy.module.tofp16 as tofp16
-import diffusion_policy.module.toint8 as toint8  
+import diffusion_policy.module.toint8 as toint8
 # import tofp16
-# import toint8  
+# import toint8
 
 """
 Layer:  Linear layer for float16 input and float16 output
@@ -10,7 +10,7 @@ Author: cxz21
 Data:   2025/07/13
 """
 class LinearFunc(torch.autograd.Function):
-    
+
     @staticmethod
     def forward(
         ctx,
@@ -29,12 +29,12 @@ class LinearFunc(torch.autograd.Function):
         # torch.save(quant_weight, "./data/scaling_factor/input_emb.weight.ckpt")
         # torch.save(scaling_factor, "./data/scaling_factor/input_emb.scaling_factor.ckpt")
 
-        quant_input = convert_int8(input.to(torch.float16) * pre_parameter).to("cuda:2")
+        quant_input = convert_int8(input.to(torch.float16) * pre_parameter).to(input.device)
         quant_output = quant_input.to(torch.float) @ quant_weight.to(torch.float).transpose(0, 1)
         quant_output = quant_output.to(torch.float) * 2
         quant_output = quant_output.round().to(torch.int32)
-        
-        quant_output = convert_fp16(quant_output).to("cuda:2")
+
+        quant_output = convert_fp16(quant_output).to(input.device)
 
         output = quant_output * scaling_factor
 
@@ -42,7 +42,7 @@ class LinearFunc(torch.autograd.Function):
             quant_input, quant_weight, input_delta, parameter, weight_delta
         )
         return output
-    
+
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
         quant_input, quant_weight, input_delta, parameter, weight_delta = ctx.saved_tensors
@@ -82,7 +82,7 @@ class Linear(torch.nn.Module):
             self.init = True
             self.weight_delta.data = toint8.fp4_init_scale(self.weight, channel_wise=True)
             self.quant_weight = toint8.fp4_quantizer(self.weight, self.weight_delta).detach().requires_grad_(False)
-            self.input_delta.data = toint8.int8_init_scale(dequant_input) * 2
+            self.input_delta.data = toint8.int8_init_scale(dequant_input) #* 2
 
             self.scaling_factor =  (self.input_delta * (2.0 ** (-self.weight_delta + 1)) * 2**13)
             self.scaling_factor = self.scaling_factor.to(torch.float16).transpose(0, 1)
@@ -92,7 +92,7 @@ class Linear(torch.nn.Module):
             self.init = False
             self.weight_delta.data = toint8.fp4_init_scale(self.weight, channel_wise=True)
             self.quant_weight = toint8.fp4_quantizer(self.weight, self.weight_delta).detach().requires_grad_(False)
-            self.input_delta.data = toint8.int8_init_scale(dequant_input) * 2
+            self.input_delta.data = toint8.int8_init_scale(dequant_input) #* 2
 
             if out_parameter is not None:
                 self.scaling_factor = self.input_delta * (2.0 ** (-self.weight_delta + 1)) * 2**13 / out_parameter
@@ -112,12 +112,12 @@ class Linear(torch.nn.Module):
             self.scaling_factor = self.scaling_factor.to(torch.float16).transpose(0, 1)
             self.pre_parameter = (parameter / self.input_delta).to(torch.float16)
             self.parameter.data = self.pre_parameter * self.input_delta
-        
+
         out = LinearFunc.apply(
-            input, 
+            input,
             self.weight,
             self.quant_weight,
-            self.pre_parameter, 
+            self.pre_parameter,
             self.input_delta,
             self.parameter,
             self.scaling_factor,
@@ -127,13 +127,13 @@ class Linear(torch.nn.Module):
         )
         # quant_weight = (toint8.fp4_quantizer(self.weight, self.weight_delta) - self.weight / (2.0 ** (-self.weight_delta + 1))).detach() + self.weight / (2.0 ** (-self.weight_delta + 1))
         # x1 = input.to(torch.float16) * self.pre_parameter
-        # quant_input = (self.convert_int8.convert(x1).to("cuda:2") - x1.to(torch.float)).detach() + x1.to(torch.float)
+        # quant_input = (self.convert_int8.convert(x1).to("cuda") - x1.to(torch.float)).detach() + x1.to(torch.float)
 
         # quant_output = quant_input.to(torch.float) @ quant_weight.to(torch.float).transpose(0, 1)
         # quant_output = quant_output.to(torch.float) * 2
         # def round_fp16(x:torch.Tensor):
         #     x = x.round().to(torch.int32)
-        #     x = self.convert_fp16.convert(x).to("cuda:2")
+        #     x = self.convert_fp16.convert(x).to("cuda")
         #     return x
         # quant_output = (round_fp16(quant_output) - quant_output / 2**14).detach() + quant_output / 2**14
 
@@ -147,13 +147,13 @@ if __name__ == "__main__":
     batch_size = 3
     # torch.manual_seed(0)
 
-    input = torch.randn(batch_size, input_features, requires_grad=True).to("cuda:2")
+    input = torch.randn(batch_size, input_features, requires_grad=True).to("cuda")
     x1 = input.clone().detach().requires_grad_(True)
     x2 = input.clone().detach().requires_grad_(True)
     custom_linear = Linear(input_features, output_features)
     torch_linear = torch.nn.Linear(input_features, output_features)
 
-    weight = torch.randn(output_features, input_features, requires_grad=True).to("cuda:2")
+    weight = torch.randn(output_features, input_features, requires_grad=True).to("cuda")
     custom_linear.weight.data = weight.clone()
     torch_linear.weight.data = weight.clone()
     custom_linear.weight_delta.data = toint8.fp4_init_scale(weight.clone(), True).detach()

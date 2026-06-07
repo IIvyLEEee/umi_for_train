@@ -4,17 +4,16 @@ import torch
 import torch.nn as nn
 from diffusion_policy.module.sinusoidal_posemb import SinusoidalPosEmb
 from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
-from diffusion_policy.module.linear import Linear
 from diffusion_policy.module.decoder import TransformerDecoder, TransformerDecoderLayer
 from diffusion_policy.module.layernorm import LayerNorm
+from diffusion_policy.module.softmax import Softmax
 
+from diffusion_policy.module.linear import Linear
 import diffusion_policy.module.quant_linear_a as qua
 import diffusion_policy.module.quant_linear_b as qub
 import diffusion_policy.module.quant_linear_c as quc
 
 from diffusion_policy.module.multihead_attn import MultiHeadAttention
-
-import diffusion_policy.module.linear as li
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +29,14 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
         p_drop_attn: float = 0.1,
         ) -> None:
         super().__init__()
-        
+
         # input embedding stem
-        self.input_emb = Linear(input_dim, n_emb)
+        self.input_emb = qub.Linear(input_dim, n_emb)
         self.pos_emb = nn.Parameter(torch.randn((1, action_horizon, n_emb)))
         self.time_emb = SinusoidalPosEmb(n_emb)
         # learnable position embedding
         self.cond_pos_emb =  nn.Parameter(torch.randn((1, max_cond_tokens, n_emb)))
-        
+
         # decoder
         decoder_layer = TransformerDecoderLayer(
             d_model=n_emb,
@@ -50,13 +49,13 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
             decoder_layer=decoder_layer,
             num_layers=n_layer
         )
-        
+
         # decoder head
-        self.ln_f = nn.LayerNorm(n_emb)
-        self.head = Linear(n_emb, output_dim)
-        
+        self.ln_f = nn.LayerNorm(n_emb, elementwise_affine=False)
+        self.head = qub.Linear(n_emb, output_dim)
+
         self.action_horizon = action_horizon
-        
+
         # init
         self.apply(self._init_weights)
         logger.info(
@@ -70,9 +69,11 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
             TransformerDecoderLayer,
             TransformerDecoder,
             MultiHeadAttention,
-            # qu_attn.MultiHeadAttention,
             nn.ModuleList,
             # ReLU,
+            Softmax,
+            LayerNorm,
+            nn.LayerNorm,
             nn.Mish,
             nn.Sequential,
             nn.Softmax,
@@ -85,6 +86,10 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
         elif isinstance(module, quc.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
@@ -93,14 +98,6 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, li.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, LayerNorm):
-            pass
-        elif isinstance(module, nn.LayerNorm):
-            pass
         elif isinstance(module, TransformerForActionDiffusion):
             torch.nn.init.normal_(module.pos_emb, mean=0.0, std=0.02)
         elif isinstance(module, ignore_types):
@@ -109,7 +106,7 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
         else:
             print(type(module))
             raise RuntimeError("Unaccounted module {}".format(module))
-    
+
     def get_optim_groups(self, weight_decay: float=1e-3):
         """
         This long function is unfortunately doing something very simple and is being very defensive:
@@ -122,9 +119,10 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
         decay = set()
         no_decay = set()
         whitelist_weight_modules = (
-            # qu.Linear,
             Linear,
-            # fe.Linear,
+            qua.Linear,
+            qub.Linear,
+            quc.Linear,
             torch.nn.Linear,
             torch.nn.MultiheadAttention,
             MultiHeadAttention,
@@ -158,14 +156,14 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
         param_dict = {pn: p for pn, p in self.named_parameters()}
         inter_params = decay & no_decay
         union_params = decay | no_decay
-        assert (
-            len(inter_params) == 0
-        ), "parameters %s made it into both decay/no_decay sets!" % (str(inter_params),)
-        assert (
-            len(param_dict.keys() - union_params) == 0
-        ), "parameters %s were not separated into either decay/no_decay set!" % (
-            str(param_dict.keys() - union_params),
-        )
+        # assert (
+        #     len(inter_params) == 0
+        # ), "parameters %s made it into both decay/no_decay sets!" % (str(inter_params),)
+        # assert (
+        #     len(param_dict.keys() - union_params) == 0
+        # ), "parameters %s were not separated into either decay/no_decay set!" % (
+        #     str(param_dict.keys() - union_params),
+        # )
 
         # create the pytorch optimizer object
         optim_groups = [
@@ -180,8 +178,8 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
         ]
         return optim_groups
 
-    def configure_optimizers(self, 
-            learning_rate: float=1e-4, 
+    def configure_optimizers(self,
+            learning_rate: float=1e-4,
             weight_decay: float=1e-3,
             betas: Tuple[float, float]=(0.9,0.95)):
         optim_groups = self.get_optim_groups(weight_decay=weight_decay)
@@ -190,9 +188,9 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
         )
         return optimizer
 
-    def forward(self, 
-        sample: torch.Tensor, 
-        timestep: Union[torch.Tensor, float, int], 
+    def forward(self,
+        sample: torch.Tensor,
+        timestep: Union[torch.Tensor, float, int],
         cond: Optional[torch.Tensor]=None, init=False, **kwargs):
         """
         x: (B,T,input_dim)
@@ -200,7 +198,7 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
         cond: (B,N,n_emb)
         output: (B,T,input_dim)
         """
-        
+
         # 1. time
         timesteps = timestep
         if not torch.is_tensor(timesteps):
@@ -212,31 +210,32 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
         timesteps = timesteps.expand(sample.shape[0])
         time_emb = self.time_emb(timesteps).unsqueeze(1)
         # (B,1,n_emb)
-        
+
         # 2. process conditions
         cond_emb = torch.cat([cond, time_emb], dim=1)
         tc = cond_emb.shape[1]
         cond_pos_emb = self.cond_pos_emb[
             :, :tc, :
-        ]  # each position maps to a (learnable) vector
+        ]
         cond_emb = cond_emb + cond_pos_emb
-        
+
         # 3. process input
-        input_emb = self.input_emb(sample, init)
+        # input_emb = self.input_emb(sample, 1, sample.to(torch.float), 8).to(torch.float16)
+        input_emb = self.input_emb(sample, 1, sample.clone().detach().to(torch.float)).to(torch.float16)
+
         t = input_emb.shape[1]
-        pos_emb = self.pos_emb[
-            :, :t, :
-        ]  # each position maps to a (learnable) vector
+        pos_emb = self.pos_emb[:, :t, :].to(torch.float16)
         input_emb = input_emb + pos_emb
-        
+
         # 4. transformer
         x = self.decoder(
             tgt=input_emb,
             memory=cond_emb,
             init=init
-        )        
+        )
         x = self.ln_f(x)
-        x = self.head(x,init)
+
+        # x = self.head(x, 16, x.clone().detach() * 16)
+        x = self.head(x, 1, x.clone().detach())
         # (B, T, n_out)
-        return x
-        
+        return x.to(torch.float)

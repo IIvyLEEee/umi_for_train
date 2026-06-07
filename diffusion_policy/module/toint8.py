@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import math
+from diffusion_policy.module.lookup_table import lookup_table_path
 
 def round_ste(x: torch.Tensor):
     zero = torch.zeros_like(x)
@@ -65,9 +66,9 @@ def int8_quantizer(input: torch.Tensor):
 
 class Convert_int8():
     def __init__(self):
-        self.convert_tensor = torch.load("/home/cxz23/new_diffusion/eval_for_demo_0628/toint_tensor.ckpt")
-        # self.convert_tensor = torch.load("/home/cxz23/new_diffusion/eval_for_demo_0628/int8_tensor.ckpt")
+        self.convert_tensor = torch.load(lookup_table_path("toint_tensor.ckpt"))
     def convert(self, x: torch.Tensor):
+        self.convert_tensor = self.convert_tensor.to(x.device)
         x = x.to(torch.float)
         x = x.clamp(-130.0, 130.0)
         x = x.to(torch.float16)
@@ -75,7 +76,7 @@ class Convert_int8():
         int16_tensor = int16_tensor.to(torch.long)
         int16_tensor = torch.where(int16_tensor >= 0, int16_tensor + 22545, int16_tensor + 32768)
         out = self.convert_tensor[int16_tensor].to(torch.float)
-        
+
         return out
 
 if __name__ == "__main__":
@@ -92,4 +93,3 @@ if __name__ == "__main__":
     # print(int8_quantizer(x))
     print(diff.max())
     print(diff.min())
-

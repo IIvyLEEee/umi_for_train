@@ -49,9 +49,10 @@ class Convert:
         float_tensor = int_tensor.to(torch.float64) / 2**14
         self.convert_tensor = convert_(float_tensor)
 
-    def convert(self, x: torch.tensor):
+    def convert(self, x: torch.Tensor):
         x = x.to(torch.long)
         x = x + 300000
+        self.convert_tensor = self.convert_tensor.to(x.device)
         out = self.convert_tensor[x]
         return out
 

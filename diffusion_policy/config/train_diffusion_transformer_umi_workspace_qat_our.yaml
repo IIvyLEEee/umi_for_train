@@ -1,0 +1,15 @@
+defaults:
+  - train_diffusion_transformer_umi_workspace_our
+  - _self_
+
+name: train_diffusion_transformer_timm_qat_our
+exp_name: "256_qat_from_scratch"
+
+policy:
+  _target_: diffusion_policy.policy.diffusion_transformer_timm_qat_policy.DiffusionTransformerTimmQATPolicy
+
+training:
+  resume: False
+
+logging:
+  resume: False

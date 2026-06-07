@@ -3,16 +3,13 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-from diffusion_policy.module.layernorm import LayerNorm
-# from diffusion_policy.module.quant_feedforward import Linear
+import diffusion_policy.module.quant_linear_a as qu
+import diffusion_policy.module.quant_linear_c as fe
 
-from diffusion_policy.module.linear import Linear
 from diffusion_policy.module.multihead_attn import MultiHeadAttention
 
-# from diffusion_policy.module.quant_attn import MultiHeadAttention
 from diffusion_policy.module.relu import relu
 from torch.nn.modules.container import ModuleList
-
 
 class TransformerDecoderLayer(nn.Module):
     __constants__ = ["batch_first", "norm_first"]
@@ -34,9 +31,9 @@ class TransformerDecoderLayer(nn.Module):
             d_model, nhead, dropout=dropout, batch_first=True
         )
         # Implementation of Feedforward model
-        self.linear1 = Linear(d_model, dim_feedforward)
+        self.linear1 = qu.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = Linear(dim_feedforward, d_model)
+        self.linear2 = fe.Linear(dim_feedforward, d_model)
 
         self.norm_first = norm_first
         self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps, elementwise_affine=False)
@@ -52,44 +49,57 @@ class TransformerDecoderLayer(nn.Module):
         self,
         tgt: torch.Tensor,
         memory: torch.Tensor,
+        tgt_mask: Optional[torch.Tensor] = None,
+        memory_mask: Optional[torch.Tensor] = None,
         init=False,
         number=0,
     ) -> torch.Tensor:
         x = tgt
         if self.norm_first:
-            x = x + self._sa_block(self.norm1(x))
-            x = x + self._mha_block(self.norm2(x), memory)
-            x = x + self._ff_block(self.norm3(x), init, number)
+            norm1 = self.norm1(x)
+            # norm1 = norm1 * 16
+            x = x + self._sa_block(norm1, tgt_mask)
+
+            norm2 = self.norm2(x)
+            # norm2 = norm2 * 16
+            x = x + self._mha_block(norm2, memory, memory_mask)
+
+            norm3 = self.norm3(x)
+            # norm3 = norm3 * 16
+            x = x + self._ff_block(norm3, init, number)
         else:
-            x = self.norm1(x + self._sa_block(x))
-            x = self.norm2(x + self._mha_block(x, memory))
+            x = self.norm1(x + self._sa_block(x, tgt_mask))
+            x = self.norm2(x + self._mha_block(x, memory, memory_mask))
             x = self.norm3(x + self._ff_block(x, init, number))
 
         return x
 
     # self-attention block
     def _sa_block(
-        self, x: torch.Tensor
+        self, x: torch.Tensor, attn_mask: Optional[torch.Tensor]
     ) -> torch.Tensor:
         # print("self_attn:")
-        x = self.self_attn(x, x, x)
+        x = self.self_attn(x, x, x, attn_mask=attn_mask)
         return self.dropout1(x)
 
     # multihead attention block
     def _mha_block(
-        self, x: torch.Tensor, mem: torch.Tensor
+        self, x: torch.Tensor, mem: torch.Tensor, attn_mask: Optional[torch.Tensor]
     ) -> torch.Tensor:
         # print("multihead_attn:")
-        x = self.multihead_attn(x, mem, mem)
+        x = self.multihead_attn(x, mem, mem, attn_mask=attn_mask)
         return self.dropout2(x)
 
     # feed forward block
     def _ff_block(self, x: torch.Tensor, init, number) -> torch.Tensor:
-        x = self.linear2(
-            self.dropout(self.activation(self.linear1(x, init, number))), init
-        )
-        return self.dropout3(x)
+        # out1, out_delta1 = self.linear1(x, 16, x.clone().detach().to(torch.float) * 16)
+        out1, out_delta1 = self.linear1(x, 1, x.clone().detach().to(torch.float))
 
+        out1 = self.activation(out1)
+
+        x = self.linear2(out1, out_delta1)
+
+        return self.dropout3(x)
 
 class TransformerDecoder(nn.Module):
     __constants__ = ["norm"]
@@ -104,6 +114,8 @@ class TransformerDecoder(nn.Module):
         self,
         tgt: torch.Tensor,
         memory: torch.Tensor,
+        tgt_mask: Optional[torch.Tensor] = None,
+        memory_mask: Optional[torch.Tensor] = None,
         init=False,
     ) -> torch.Tensor:
         output = tgt
@@ -112,6 +124,8 @@ class TransformerDecoder(nn.Module):
             output = mod(
                 output,
                 memory,
+                tgt_mask=tgt_mask,
+                memory_mask=memory_mask,
                 init=init,
                 number=a,
             )

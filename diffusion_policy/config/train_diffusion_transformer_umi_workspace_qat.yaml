@@ -1,0 +1,26 @@
+defaults:
+  - train_diffusion_transformer_umi_workspace
+  - _self_
+
+name: train_diffusion_transformer_timm_qat
+exp_name: "768_qat_from_epoch0130"
+
+policy:
+  _target_: diffusion_policy.policy.diffusion_transformer_timm_qat_policy.DiffusionTransformerTimmQATPolicy
+
+dataloader:
+  batch_size: 32
+
+val_dataloader:
+  batch_size: 32
+
+optimizer:
+  lr: 1.0e-4
+
+training:
+  init_checkpoint: /data/archive_liyixuan23/umi_for_train/data/outputs/2025.09.18/16.37.43_train_diffusion_transformer_timm_umi/checkpoints/epoch=0130-train_loss=0.012.ckpt
+  resume: False
+  lr_warmup_steps: 0
+
+logging:
+  resume: False

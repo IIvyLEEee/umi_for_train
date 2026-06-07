@@ -28,6 +28,7 @@ from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
 from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.model.diffusion.ema_model import EMAModel
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
+from diffusion_policy.common.qat_checkpoint_util import initialize_qat_from_fp32_checkpoint
 from accelerate import Accelerator
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
@@ -52,6 +53,21 @@ class TrainDiffusionTransformerTimmWorkspace(BaseWorkspace):
         self.ema_model: DiffusionTransformerTimmPolicy = None
         if cfg.training.use_ema:
             self.ema_model = copy.deepcopy(self.model)
+
+        init_checkpoint = cfg.training.get('init_checkpoint', None)
+        if init_checkpoint is not None:
+            if cfg.training.resume:
+                raise ValueError("training.init_checkpoint and training.resume are mutually exclusive")
+            report = initialize_qat_from_fp32_checkpoint(
+                model=self.model,
+                ema_model=self.ema_model,
+                checkpoint_path=init_checkpoint,
+            )
+            print(
+                f"Initialized QAT model from {init_checkpoint}: "
+                f"model copied={report['model']['copied']}, "
+                f"ema copied={report['ema_model']['copied'] if report['ema_model'] else 0}"
+            )
 
         # configure training state
         self.optimizer = self.model.get_optimizer(**cfg.optimizer)
@@ -237,13 +253,18 @@ class TrainDiffusionTransformerTimmWorkspace(BaseWorkspace):
                         accelerator.backward(loss)
 
                         # step optimizer
-                        if self.global_step % cfg.training.gradient_accumulate_every == 0:
+                        optimizer_step = (
+                            (self.global_step + 1)
+                            % cfg.training.gradient_accumulate_every
+                            == 0
+                        )
+                        if optimizer_step:
                             self.optimizer.step()
                             self.optimizer.zero_grad()
                             lr_scheduler.step()
                         
                         # update ema
-                        if cfg.training.use_ema:
+                        if cfg.training.use_ema and optimizer_step:
                             ema.step(accelerator.unwrap_model(self.model))
 
                         # logging
@@ -280,7 +301,7 @@ class TrainDiffusionTransformerTimmWorkspace(BaseWorkspace):
                 policy.eval()
 
                 # run rollout
-                if (self.epoch % cfg.training.rollout_every) == 0:
+                if cfg.training.rollout_every > 0 and (self.epoch % cfg.training.rollout_every) == 0:
                     runner_log = env_runner.run(policy)
                     # log all
                     step_log.update(runner_log)
@@ -312,7 +333,7 @@ class TrainDiffusionTransformerTimmWorkspace(BaseWorkspace):
                     step_log[f'{category}_action_mse_error_rot'] = torch.nn.functional.mse_loss(pred_action[..., 3:9], gt_action[..., 3:9])
                     step_log[f'{category}_action_mse_error_width'] = torch.nn.functional.mse_loss(pred_action[..., 9], gt_action[..., 9])
                 # run diffusion sampling on a training batch
-                if (self.epoch % cfg.training.sample_every) == 0 and accelerator.is_main_process:
+                if cfg.training.sample_every > 0 and (self.epoch % cfg.training.sample_every) == 0 and accelerator.is_main_process:
                     with torch.no_grad():
                         # sample trajectory from training set, and evaluate difference
                         batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
@@ -332,7 +353,7 @@ class TrainDiffusionTransformerTimmWorkspace(BaseWorkspace):
                         del pred_action
                 
                 # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0 and accelerator.is_main_process:
+                if cfg.training.checkpoint_every > 0 and (self.epoch % cfg.training.checkpoint_every) == 0 and accelerator.is_main_process:
                     # unwrap the model to save ckpt
                     model_ddp = self.model
                     self.model = accelerator.unwrap_model(self.model)
