@@ -14,7 +14,10 @@ def int8_init_scale(x: torch.Tensor):
     x_max = max(x.data.max().item(), 0)
     x_absmax = max(abs(x_min), x_max)
     delta = x_absmax / 127.
-    delta = torch.tensor(delta).type_as(x)
+    # An all-zero activation has no dynamic range. Keep its quantization
+    # scale finite so downstream parameter / scale calculations do not
+    # produce inf or NaN.
+    delta = torch.tensor(delta if delta > 0 else 1.0).type_as(x)
     return delta
 
 def fp4_init_scale(x: torch.Tensor, channel_wise: bool = False):
@@ -70,6 +73,10 @@ class Convert_int8():
     def convert(self, x: torch.Tensor):
         self.convert_tensor = self.convert_tensor.to(x.device)
         x = x.to(torch.float)
+        # NaN survives clamp() and its FP16 bit pattern is outside this
+        # lookup table. Map non-finite inputs to deterministic saturating
+        # values before interpreting the FP16 bits as lookup indices.
+        x = torch.nan_to_num(x, nan=0.0, posinf=130.0, neginf=-130.0)
         x = x.clamp(-130.0, 130.0)
         x = x.to(torch.float16)
         int16_tensor = x.clone().view(torch.short)
