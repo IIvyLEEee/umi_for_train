@@ -4,7 +4,6 @@ import torch.nn as nn
 # import torch.nn.functional as F
 # from diffusion_policy.module.linear import Linear
 import diffusion_policy.module.quant_linear_a as qu
-from diffusion_policy.module.softmax import Softmax
 import diffusion_policy.module.quant_linear_b as fe
 from torch.autograd import Function
 from torch.nn.modules.activation import MultiheadAttention
@@ -92,8 +91,7 @@ class MultiHeadAttention(nn.Module):
         self.keys = qu.Linear(embed_size, embed_size, bias=False)
         self.queries = qu.Linear(embed_size, embed_size, bias=False)
         self.fc_out = fe.Linear(embed_size, embed_size, bias=False)
-        # self.softmax = nn.Softmax(dim=3)
-        self.softmax = Softmax()
+        self.softmax = nn.Softmax(dim=-1)
         self.dropout = nn.Dropout(self.dropout)
 
     def forward(self, queries, keys, values, attn_mask=None):
