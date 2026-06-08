@@ -76,6 +76,7 @@ class TransformerObsEncoder(ModuleAttrMixin):
         low_dim_keys = list()
         key_model_map = nn.ModuleDict()
         key_transform_map = nn.ModuleDict()
+        key_eval_transform_map = nn.ModuleDict()
         key_projection_map = nn.ModuleDict()
         key_shape_map = dict()
 
@@ -168,6 +169,10 @@ class TransformerObsEncoder(ModuleAttrMixin):
                 torchvision.transforms.Resize(size=image_shape[0], antialias=True)
             ] + transforms[1:]
         transform = nn.Identity() if transforms is None else torch.nn.Sequential(*transforms)
+        # Sampling metrics and validation should not depend on random training
+        # augmentation. The dataset already provides images at the configured
+        # policy size, so eval can use an identity image path.
+        eval_transform = nn.Identity()
 
         for key, attr in obs_shape_meta.items():
             shape = tuple(attr['shape'])
@@ -193,6 +198,7 @@ class TransformerObsEncoder(ModuleAttrMixin):
 
                 this_transform = transform
                 key_transform_map[key] = this_transform
+                key_eval_transform_map[key] = eval_transform
             elif type == 'low_dim':
                 dim = np.prod(shape)
                 proj = nn.Identity()
@@ -213,6 +219,7 @@ class TransformerObsEncoder(ModuleAttrMixin):
         self.shape_meta = shape_meta
         self.key_model_map = key_model_map
         self.key_transform_map = key_transform_map
+        self.key_eval_transform_map = key_eval_transform_map
         self.key_projection_map = key_projection_map
         self.share_rgb_model = share_rgb_model
         self.rgb_keys = rgb_keys
@@ -267,7 +274,14 @@ class TransformerObsEncoder(ModuleAttrMixin):
             assert B == batch_size
             assert img.shape[2:] == self.key_shape_map[key]
             img = img.reshape(B*T, *img.shape[2:])
-            img = self.key_transform_map[key](img)
+            transform = self.key_transform_map[key] if self.training else self.key_eval_transform_map[key]
+            if img.is_cuda:
+                # torchvision geometric transforms call grid_sample, which does
+                # not support bf16 CUDA tensors in the current torch build.
+                with torch.autocast(device_type=img.device.type, enabled=False):
+                    img = transform(img.float())
+            else:
+                img = transform(img)
             raw_feature = self.key_model_map[key](img)
             feature = self.aggregate_feature(raw_feature)
             emb = self.key_projection_map[key](feature)

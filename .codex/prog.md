@@ -302,3 +302,77 @@
   `accelerate launch --mixed_precision no` 后重新启动成功。
 - 当前 QAT 768 已完成多个 forward/backward step，每卡约占 37.5 GiB；
   每个 epoch 为 1372 step，初期约 6.1 秒/step。
+
+## 2026-06-08 11:23:00 +0800
+
+- 在新 7 卡 A800 服务器 `connect.bjb1.seetacloud.com:43831` 上启动
+  `example_pick_place` 的 FP32 768 训练，会话名
+  `fp32_place_768_b448`。
+- 使用原始 `train_diffusion_transformer_umi_workspace.yaml`，该配置为
+  `n_emb=768`、`n_head=8`、policy LR `3e-4`、ViT/obs encoder LR `3e-5`、
+  `policy.obs_encoder.frozen=False`、`training.freeze_encoder=False`。
+- 覆盖项为数据集路径
+  `task.dataset_path=example_pick_place/pick_place_dataset.zarr.zip`、
+  `dataloader.batch_size=64`、`val_dataloader.batch_size=64`，7 卡总 batch
+  为 448；`accelerate launch` 显式使用 `--mixed_precision no`。
+- 训练已进入 epoch 0，batch 64/卡未 OOM；每张 A800 显存约 64.7 GiB，
+  GPU 利用率 100%。当前每个 epoch 为 108 step，初期约 3.8-4.0 秒/step。
+
+## 2026-06-08 11:39:00 +0800
+
+- 尝试将同一 `example_pick_place` 768 FP32 训练改为 Accelerate bf16。
+  首次直接启动 batch96 失败，原因是 `torchvision.transforms.RandomRotation`
+  调用的 CUDA `grid_sample` 不支持 `BFloat16`。
+- 修改 `diffusion_policy/model/vision/transformer_obs_encoder.py`：仅在
+  `TransformerObsEncoder.forward()` 中把 RGB 图像增强放到
+  `torch.autocast(..., enabled=False)` 下并转成 fp32；ViT 和 policy 主体仍由
+  外层 bf16 autocast 控制。该改动不触碰 QAT module/chip 算子逻辑。
+- 修改 `diffusion_policy/workspace/train_diffusion_transformer_timm_workspace.py`：
+  `normalizer.pkl` 写入改成显式 `with open`、`flush`、`os.fsync`，barrier 后
+  等文件出现，修复多卡 normalizer 初始化偶发竞态。
+- 验证 bf16 batch96 可跑：7 卡总 batch 672，显存约 56 GiB/卡，每个 epoch
+  72 step，约 0.83 秒/step。
+- 按要求继续验证 bf16 batch128：7 卡总 batch 896，显存约 71.5-72.7 GiB/卡，
+  已完成 epoch 0 并进入 epoch 1；每个 epoch 54 step，epoch 0 约 64 秒。
+  当前保留会话 `fp32_place_768_bf16_b896_retry` 继续训练。
+
+## 2026-06-08 16:14:00 +0800
+
+- 在 7 卡 A800 服务器上启动 `example_pick_place` 的 256 维 `our` FP32
+  配置混合精度训练，使用
+  `train_diffusion_transformer_umi_workspace_our.yaml`，`n_emb=256`、`n_head=4`。
+- 启动参数：Accelerate bf16、7 卡、每卡 batch `128`、总 batch `896`、
+  policy LR `3e-4`、ViT/obs encoder LR `3e-5`、ViT 未冻结。
+- 首次启动卡在 normalizer 之后且没有生成 `normalizer.pkl`。为避免多卡启动
+  依赖共享 pickle 文件，进一步修改
+  `train_diffusion_transformer_timm_workspace.py`：每个 rank 独立计算 normalizer，
+  主进程仅负责把 normalizer 写入输出目录用于记录。
+- 重启后会话 `fp32_place_256_our_bf16_b896_retry` 正常进入训练；epoch 0 已完成
+  并进入 epoch 1。显存约 67.7-68.7 GiB/卡，每个 epoch 54 step，epoch 0
+  约 60 秒。
+
+## 2026-06-08 18:42:00 +0800
+
+- 继续定位 5 卡服务器上 `train_action_mse_error` / `val_action_mse_error`
+  越训越高的问题。当前本地 transformer timm workspace 的真正 `val_loss`
+  计算仍是注释状态，已有日志也没有 `val_loss` 字段，因此优先按采样 action
+  MSE 评估路径排查。
+- 尝试只读 SSH 到记录中的 5 卡服务器
+  `liyixuan@connect.bjb1.seetacloud.com:34070`：沙箱内 DNS 被限制；提权后远端
+  返回 `Permission denied (publickey,password)`，因此本轮无法直接读取最新异常
+  run。
+- 修复评估路径的三类非确定性/污染源：`TransformerObsEncoder.eval()` 下禁用
+  RandomCrop/RandomRotation/ColorJitter 等训练增强；Transformer FP32/QAT policy
+  的 `predict_action()` 支持传入固定 `torch.Generator`；移除采样时裸
+  `print(trajectory.dtype)`。
+- workspace 的 epoch 末 action MSE 采样改为固定 seed，并将 MSE Tensor
+  显式 `.item()` 后写入日志；保留原有 EMA 采样指标名，同时新增
+  `_raw_model` 后缀指标用于区分 EMA 滞后和当前模型表现。
+- 恢复 transformer timm workspace 的 `val_loss`，但改为所有 rank 同步跑
+  validation shard 后通过 `accelerator.gather()` 聚合，避免旧 main-only
+  validation 在多卡 DDP 下造成其他 rank 提前进入下一轮训练。
+- 新增 `.codex/analyze_training_metrics.py`，可解析 `logs.json.txt` 并汇总
+  `train_loss`、action MSE、LR 和持续上升点。已用本地 FP32/QAT 日志验证脚本可
+  运行；现有本地 run 没有 action MSE 字段。
+- 语法检查通过：将 `py_compile` 产物写到 `/tmp`，避免 `.codex/__pycache__`
+  只读导致的假失败。

@@ -175,3 +175,7 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 lookup_tables/*.ckpt
+# Local cc-connect credentials and runtime configuration
+config.toml
+.config.toml.lock
+.cc-connect-data/

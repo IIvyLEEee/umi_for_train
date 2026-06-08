@@ -113,15 +113,17 @@ class TrainDiffusionTransformerTimmWorkspace(BaseWorkspace):
         assert isinstance(dataset, BaseImageDataset) or isinstance(dataset, BaseDataset)
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
 
-        # compute normalizer on the main process and save to disk
+        # Compute the normalizer in each process. This avoids a distributed
+        # startup race where non-main ranks wait on a shared pickle file before
+        # the main rank has durably published it.
         normalizer_path = os.path.join(self.output_dir, 'normalizer.pkl')
+        normalizer = dataset.get_normalizer()
         if accelerator.is_main_process:
-            normalizer = dataset.get_normalizer()
-            pickle.dump(normalizer, open(normalizer_path, 'wb'))
-
-        # load normalizer on all processes
+            with open(normalizer_path, 'wb') as f:
+                pickle.dump(normalizer, f)
+                f.flush()
+                os.fsync(f.fileno())
         accelerator.wait_for_everyone()
-        normalizer = pickle.load(open(normalizer_path, 'rb'))
 
         # configure validation dataset
         val_dataset = dataset.get_validation_dataset()
@@ -306,51 +308,80 @@ class TrainDiffusionTransformerTimmWorkspace(BaseWorkspace):
                     # log all
                     step_log.update(runner_log)
 
-                # run validation
-                # if (self.epoch % cfg.training.val_every) == 0 and len(val_dataloader) > 0 and accelerator.is_main_process:
-                #     with torch.no_grad():
-                #         val_losses = list()
-                #         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}", 
-                #                 leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
-                #             for batch_idx, batch in enumerate(tepoch):
-                #                 batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
-                #                 loss = self.model(batch)
-                #                 val_losses.append(loss)
-                #                 if (cfg.training.max_val_steps is not None) \
-                #                     and batch_idx >= (cfg.training.max_val_steps-1):
-                #                     break
-                #         if len(val_losses) > 0:
-                #             val_loss = torch.mean(torch.tensor(val_losses)).item()
-                #             # log epoch average validation loss
-                #             step_log['val_loss'] = val_loss
+                # run validation on every rank, then aggregate. Running only on
+                # the main process can let other ranks enter the next DDP train
+                # step early.
+                if cfg.training.val_every > 0 and (self.epoch % cfg.training.val_every) == 0 and len(val_dataloader) > 0:
+                    self.model.eval()
+                    with torch.no_grad():
+                        val_losses = list()
+                        with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}",
+                                leave=False, mininterval=cfg.training.tqdm_interval_sec,
+                                disable=not accelerator.is_main_process) as tepoch:
+                            for batch_idx, batch in enumerate(tepoch):
+                                batch = dict_apply(batch, lambda x: x.to(device, non_blocking=True))
+                                loss = self.model(batch)
+                                val_losses.append(loss.detach())
+                                if (cfg.training.max_val_steps is not None) \
+                                    and batch_idx >= (cfg.training.max_val_steps-1):
+                                    break
+                        if len(val_losses) > 0:
+                            local_val_loss = torch.stack(val_losses).mean().reshape(1)
+                            val_loss = accelerator.gather(local_val_loss).mean().item()
+                            if accelerator.is_main_process:
+                                step_log['val_loss'] = val_loss
 
-                def log_action_mse(step_log, category, pred_action, gt_action):
+                def make_sample_generator(offset):
+                    sample_seed = int(cfg.training.get('sample_seed', cfg.training.seed))
+                    generator = torch.Generator(device=device)
+                    generator.manual_seed(sample_seed + self.epoch * 1000 + offset)
+                    return generator
+
+                def log_action_mse(step_log, category, pred_action, gt_action, suffix=''):
                     B, T, _ = pred_action.shape
                     pred_action = pred_action.view(B, T, -1, 10)
                     gt_action = gt_action.view(B, T, -1, 10)
-                    step_log[f'{category}_action_mse_error'] = torch.nn.functional.mse_loss(pred_action, gt_action)
-                    step_log[f'{category}_action_mse_error_pos'] = torch.nn.functional.mse_loss(pred_action[..., :3], gt_action[..., :3])
-                    step_log[f'{category}_action_mse_error_rot'] = torch.nn.functional.mse_loss(pred_action[..., 3:9], gt_action[..., 3:9])
-                    step_log[f'{category}_action_mse_error_width'] = torch.nn.functional.mse_loss(pred_action[..., 9], gt_action[..., 9])
+                    step_log[f'{category}_action_mse_error{suffix}'] = torch.nn.functional.mse_loss(pred_action, gt_action).item()
+                    step_log[f'{category}_action_mse_error_pos{suffix}'] = torch.nn.functional.mse_loss(pred_action[..., :3], gt_action[..., :3]).item()
+                    step_log[f'{category}_action_mse_error_rot{suffix}'] = torch.nn.functional.mse_loss(pred_action[..., 3:9], gt_action[..., 3:9]).item()
+                    step_log[f'{category}_action_mse_error_width{suffix}'] = torch.nn.functional.mse_loss(pred_action[..., 9], gt_action[..., 9]).item()
+
+                def sample_and_log_action_mse(step_log, category, policy, batch, seed_offset, suffix=''):
+                    gt_action = batch['action']
+                    pred_action = policy.predict_action(
+                        batch['obs'],
+                        generator=make_sample_generator(seed_offset)
+                    )['action_pred']
+                    log_action_mse(step_log, category, pred_action, gt_action, suffix=suffix)
+                    return pred_action
+
                 # run diffusion sampling on a training batch
                 if cfg.training.sample_every > 0 and (self.epoch % cfg.training.sample_every) == 0 and accelerator.is_main_process:
                     with torch.no_grad():
                         # sample trajectory from training set, and evaluate difference
                         batch = dict_apply(train_sampling_batch, lambda x: x.to(device, non_blocking=True))
-                        gt_action = batch['action']
-                        pred_action = policy.predict_action(batch['obs'])['action_pred']
-                        log_action_mse(step_log, 'train', pred_action, gt_action)
+                        sample_and_log_action_mse(step_log, 'train', policy, batch, seed_offset=0)
+
+                        if cfg.training.use_ema:
+                            raw_policy = accelerator.unwrap_model(self.model)
+                            raw_policy.eval()
+                            sample_and_log_action_mse(
+                                step_log, 'train', raw_policy, batch,
+                                seed_offset=0, suffix='_raw_model')
 
                         if len(val_dataloader) > 0:
                             val_sampling_batch = next(iter(val_dataloader))
                             batch = dict_apply(val_sampling_batch, lambda x: x.to(device, non_blocking=True))
-                            gt_action = batch['action']
-                            pred_action = policy.predict_action(batch['obs'])['action_pred']
-                            log_action_mse(step_log, 'val', pred_action, gt_action)
+                            sample_and_log_action_mse(step_log, 'val', policy, batch, seed_offset=1)
+
+                            if cfg.training.use_ema:
+                                raw_policy = accelerator.unwrap_model(self.model)
+                                raw_policy.eval()
+                                sample_and_log_action_mse(
+                                    step_log, 'val', raw_policy, batch,
+                                    seed_offset=1, suffix='_raw_model')
 
                         del batch
-                        del gt_action
-                        del pred_action
                 
                 # checkpoint
                 if cfg.training.checkpoint_every > 0 and (self.epoch % cfg.training.checkpoint_every) == 0 and accelerator.is_main_process:

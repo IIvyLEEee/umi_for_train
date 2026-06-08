@@ -99,12 +99,14 @@ class DiffusionTransformerTimmQATPolicy(BaseImagePolicy):
         # finally make sure conditioning is enforced
         trajectory[condition_mask] = condition_data[condition_mask]
 
-        print(trajectory.dtype)
-
         return trajectory
 
 
-    def predict_action(self, obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def predict_action(
+            self,
+            obs_dict: Dict[str, torch.Tensor],
+            generator: torch.Generator=None
+        ) -> Dict[str, torch.Tensor]:
         """
         obs_dict: must include "obs" key
         result: must include "action" key
@@ -127,6 +129,7 @@ class DiffusionTransformerTimmQATPolicy(BaseImagePolicy):
             condition_data=cond_data,
             condition_mask=cond_mask,
             cond=obs_tokens,
+            generator=generator,
             **self.kwargs)
 
         # unnormalize prediction
